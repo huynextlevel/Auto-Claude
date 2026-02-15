@@ -66,6 +66,8 @@ import { GlobalDownloadIndicator } from './components/GlobalDownloadIndicator';
 import { useIpcListeners } from './hooks/useIpc';
 import { useGlobalTerminalListeners } from './hooks/useGlobalTerminalListeners';
 import { useTerminalProfileChange } from './hooks/useTerminalProfileChange';
+import { usePostQaAutomation } from './hooks/usePostQaAutomation';
+import { useToast } from './hooks/use-toast';
 import { COLOR_THEMES, UI_SCALE_MIN, UI_SCALE_MAX, UI_SCALE_DEFAULT } from '../shared/constants';
 import type { Task, Project, ColorTheme } from '../shared/types';
 import { ProjectTabBar } from './components/ProjectTabBar';
@@ -115,6 +117,24 @@ export function App() {
 
   // Handle terminal profile change events (recreate terminals on profile switch)
   useTerminalProfileChange();
+
+  // Toast for notifications
+  const { toast } = useToast();
+
+  // Handle post-QA automation (auto-create PR, auto-merge, auto-archive)
+  usePostQaAutomation({
+    onAutomationTriggered: (taskId, action) => {
+      console.log(`[App] Post-QA automation triggered for task ${taskId}: ${action}`);
+    },
+    onAutomationFailed: (taskId, error) => {
+      console.error(`[App] Post-QA automation failed for task ${taskId}:`, error);
+      toast({
+        variant: 'destructive',
+        title: 'Post-QA Automation Failed',
+        description: `Task "${taskId}" automation failed: ${error}`,
+      });
+    }
+  });
 
   // Stores
   const projects = useProjectStore((state) => state.projects);

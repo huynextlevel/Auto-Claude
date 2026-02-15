@@ -134,6 +134,9 @@ export function TaskCreationWizard({
     return PHASE_KEYS.some(phase => FAST_MODE_MODELS.includes(phaseModels[phase]));
   }, [phaseModels]);
 
+  // Post-QA action setting
+  const [postQaAction, setPostQaAction] = useState<'do_nothing' | 'auto_create_pr' | 'auto_merge'>('do_nothing');
+
   // Draft state
   const [isDraftRestored, setIsDraftRestored] = useState(false);
 
@@ -173,6 +176,7 @@ export function TaskCreationWizard({
         setReferencedFiles(draft.referencedFiles ?? []);
         setRequireReviewBeforeCoding(draft.requireReviewBeforeCoding ?? false);
         setFastMode(draft.fastMode ?? false);
+        setPostQaAction(draft.postQaAction ?? 'do_nothing');
         setIsDraftRestored(true);
 
         if (draft.category || draft.priority || draft.complexity || draft.impact) {
@@ -273,8 +277,9 @@ export function TaskCreationWizard({
     referencedFiles,
     requireReviewBeforeCoding,
     fastMode,
+    postQaAction,
     savedAt: new Date()
-  }), [projectId, title, description, category, priority, complexity, impact, profileId, model, thinkingLevel, phaseModels, phaseThinking, images, referencedFiles, requireReviewBeforeCoding, fastMode]);
+  }), [projectId, title, description, category, priority, complexity, impact, profileId, model, thinkingLevel, phaseModels, phaseThinking, images, referencedFiles, requireReviewBeforeCoding, fastMode, postQaAction]);
 
   /**
    * Detect @ mention being typed and show autocomplete
@@ -443,6 +448,7 @@ export function TaskCreationWizard({
       if (images.length > 0) metadata.attachedImages = images;
       if (allReferencedFiles.length > 0) metadata.referencedFiles = allReferencedFiles;
       if (requireReviewBeforeCoding) metadata.requireReviewBeforeCoding = true;
+      if (postQaAction !== 'do_nothing') metadata.postQaAction = postQaAction;
       // Always include baseBranch - resolve PROJECT_DEFAULT_BRANCH to actual branch name
       // This ensures the backend always knows which branch to use for worktree creation
       if (baseBranch === PROJECT_DEFAULT_BRANCH) {
@@ -489,6 +495,7 @@ export function TaskCreationWizard({
     setReferencedFiles([]);
     setRequireReviewBeforeCoding(false);
     setFastMode(false);
+    setPostQaAction('do_nothing');
     setBaseBranch(PROJECT_DEFAULT_BRANCH);
     setUseWorktree(true);
     setError(null);
@@ -674,6 +681,8 @@ export function TaskCreationWizard({
           fastMode={fastMode}
           onFastModeChange={setFastMode}
           showFastModeToggle={showFastModeToggle}
+          postQaAction={postQaAction}
+          onPostQaActionChange={setPostQaAction}
           disabled={isCreating}
           error={error}
           onError={setError}

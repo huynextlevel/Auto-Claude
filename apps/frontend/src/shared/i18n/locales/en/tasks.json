@@ -258,6 +258,13 @@
     "fastModeLabel": "Fast Mode",
     "fastModeDescription": "Same Opus 4.6 model with faster output. Higher cost per token.",
     "fastModeNotice": "Requires \"extra usage\" enabled on your Claude subscription.",
+    "postQaActionLabel": "After successful AI review",
+    "postQaActionDescription": "Choose what happens automatically after AI review passes. Tasks will be auto-archived when using auto options.",
+    "postQaAction": {
+      "do_nothing": "Do nothing - Manual review required",
+      "auto_create_pr": "Auto-create PR",
+      "auto_merge": "Auto-merge to base branch"
+    },
     "errors": {
       "descriptionRequired": "Please provide a description",
       "maxImagesReached": "Maximum of 5 images allowed",

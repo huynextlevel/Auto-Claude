@@ -134,6 +134,11 @@ export function TaskEditDialog({ task, open, onOpenChange, onSaved }: TaskEditDi
   // Disable fast mode toggle for tasks that have moved past backlog
   const isFastModeEditable = task.status === 'backlog';
 
+  // Post-QA action setting
+  const [postQaAction, setPostQaAction] = useState<'do_nothing' | 'auto_create_pr' | 'auto_merge'>(
+    task.metadata?.postQaAction ?? 'do_nothing'
+  );
+
   // Reset form when task changes or dialog opens
   useEffect(() => {
     if (open) {
@@ -175,6 +180,7 @@ export function TaskEditDialog({ task, open, onOpenChange, onSaved }: TaskEditDi
       setImages(task.metadata?.attachedImages || []);
       setRequireReviewBeforeCoding(task.metadata?.requireReviewBeforeCoding ?? false);
       setFastMode(task.metadata?.fastMode ?? false);
+      setPostQaAction(task.metadata?.postQaAction ?? 'do_nothing');
       setError(null);
 
       // Auto-expand classification if it has content
@@ -222,7 +228,8 @@ export function TaskEditDialog({ task, open, onOpenChange, onSaved }: TaskEditDi
       fastMode !== (task.metadata?.fastMode ?? false) ||
       JSON.stringify(images) !== JSON.stringify(task.metadata?.attachedImages || []) ||
       JSON.stringify(phaseModels) !== JSON.stringify(task.metadata?.phaseModels || DEFAULT_PHASE_MODELS) ||
-      JSON.stringify(phaseThinking) !== JSON.stringify(task.metadata?.phaseThinking || DEFAULT_PHASE_THINKING);
+      JSON.stringify(phaseThinking) !== JSON.stringify(task.metadata?.phaseThinking || DEFAULT_PHASE_THINKING) ||
+      postQaAction !== (task.metadata?.postQaAction ?? 'do_nothing');
 
     if (!hasChanges) {
       onOpenChange(false);
@@ -249,6 +256,8 @@ export function TaskEditDialog({ task, open, onOpenChange, onSaved }: TaskEditDi
     metadataUpdates.attachedImages = images.length > 0 ? images : [];
     metadataUpdates.requireReviewBeforeCoding = requireReviewBeforeCoding;
     metadataUpdates.fastMode = fastMode;
+    // Always set postQaAction to ensure we can clear it when set to 'do_nothing'
+    metadataUpdates.postQaAction = postQaAction;
 
     const success = await persistUpdateTask(task.id, {
       title: trimmedTitle,
@@ -331,6 +340,8 @@ export function TaskEditDialog({ task, open, onOpenChange, onSaved }: TaskEditDi
         fastMode={fastMode}
         onFastModeChange={setFastMode}
         showFastModeToggle={showFastModeToggle && isFastModeEditable}
+        postQaAction={postQaAction}
+        onPostQaActionChange={setPostQaAction}
         disabled={isSaving}
         error={error}
         onError={setError}
