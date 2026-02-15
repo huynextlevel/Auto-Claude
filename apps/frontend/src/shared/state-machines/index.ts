@@ -32,3 +32,6 @@ export type {
   GenerationStateName,
   FeatureStateName,
 } from './roadmap-state-utils';
+
+export { terminalMachine } from './terminal-machine';
+export type { TerminalContext, TerminalEvent } from './terminal-machine';

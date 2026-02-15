@@ -1,9 +1,49 @@
 import { create } from 'zustand';
+import { createActor } from 'xstate';
+import type { ActorRefFrom } from 'xstate';
 import { v4 as uuid } from 'uuid';
 import { arrayMove } from '@dnd-kit/sortable';
 import type { TerminalSession, TerminalWorktreeConfig } from '../../shared/types';
+import { terminalMachine, type TerminalEvent } from '../../shared/state-machines';
 import { terminalBufferManager } from '../lib/terminal-buffer-manager';
 import { debugLog, debugError } from '../../shared/utils/debug-logger';
+
+type TerminalActor = ActorRefFrom<typeof terminalMachine>;
+
+/**
+ * Module-level Map to store terminal ID -> XState actor mappings.
+ *
+ * DESIGN NOTE: Stored outside Zustand because actors are mutable references
+ * that shouldn't be serialized in state. Similar pattern to xtermCallbacks.
+ */
+const terminalActors = new Map<string, TerminalActor>();
+
+/**
+ * Get or create an XState terminal actor for a given terminal ID.
+ * Actors are lazily created on first access and cached for the terminal's lifetime.
+ */
+export function getOrCreateTerminalActor(terminalId: string): TerminalActor {
+  let actor = terminalActors.get(terminalId);
+  if (!actor) {
+    actor = createActor(terminalMachine);
+    actor.start();
+    terminalActors.set(terminalId, actor);
+    debugLog(`[TerminalStore] Created XState actor for terminal: ${terminalId}`);
+  }
+  return actor;
+}
+
+/**
+ * Send an event to a terminal's XState machine.
+ * Creates the actor if it doesn't exist yet.
+ */
+export function sendTerminalMachineEvent(terminalId: string, event: TerminalEvent): void {
+  const actor = getOrCreateTerminalActor(terminalId);
+  const stateBefore = String(actor.getSnapshot().value);
+  actor.send(event);
+  const stateAfter = String(actor.getSnapshot().value);
+  debugLog(`[TerminalStore] Machine ${terminalId}: ${event.type} (${stateBefore} -> ${stateAfter})`);
+}
 
 /**
  * Module-level Map to store terminal ID -> xterm write callback mappings.
@@ -301,9 +341,15 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   },
 
   removeTerminal: (id: string) => {
-    // Clean up buffer manager and output callback
+    // Clean up buffer manager, output callback, and XState actor
     terminalBufferManager.dispose(id);
     xtermCallbacks.delete(id);
+    const actor = terminalActors.get(id);
+    if (actor) {
+      actor.stop();
+      terminalActors.delete(id);
+      debugLog(`[TerminalStore] Cleaned up XState actor for terminal: ${id}`);
+    }
 
     set((state) => {
       const newTerminals = state.terminals.filter((t) => t.id !== id);
@@ -331,6 +377,13 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   },
 
   setTerminalStatus: (id: string, status: TerminalStatus) => {
+    // Notify XState machine of lifecycle transitions
+    if (status === 'running') {
+      sendTerminalMachineEvent(id, { type: 'SHELL_READY' });
+    } else if (status === 'exited') {
+      sendTerminalMachineEvent(id, { type: 'SHELL_EXITED' });
+    }
+
     set((state) => ({
       terminals: state.terminals.map((t) =>
         t.id === id ? { ...t, status } : t
@@ -339,6 +392,18 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   },
 
   setClaudeMode: (id: string, isClaudeMode: boolean) => {
+    // Send corresponding event to XState machine
+    if (isClaudeMode) {
+      // Ensure machine has transitioned past idle before sending CLAUDE_ACTIVE
+      const actor = getOrCreateTerminalActor(id);
+      if (String(actor.getSnapshot().value) === 'idle') {
+        sendTerminalMachineEvent(id, { type: 'SHELL_READY' });
+      }
+      sendTerminalMachineEvent(id, { type: 'CLAUDE_ACTIVE' });
+    } else {
+      sendTerminalMachineEvent(id, { type: 'CLAUDE_EXITED' });
+    }
+
     set((state) => ({
       terminals: state.terminals.map((t) =>
         t.id === id
@@ -356,6 +421,9 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   },
 
   setClaudeSessionId: (id: string, sessionId: string) => {
+    // Send CLAUDE_ACTIVE with session ID to XState machine
+    sendTerminalMachineEvent(id, { type: 'CLAUDE_ACTIVE', claudeSessionId: sessionId });
+
     set((state) => ({
       terminals: state.terminals.map((t) =>
         t.id === id ? { ...t, claudeSessionId: sessionId } : t
@@ -380,6 +448,9 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   },
 
   setClaudeBusy: (id: string, isBusy: boolean) => {
+    // Send CLAUDE_BUSY event to XState machine
+    sendTerminalMachineEvent(id, { type: 'CLAUDE_BUSY', isBusy });
+
     set((state) => ({
       terminals: state.terminals.map((t) =>
         t.id === id ? { ...t, isClaudeBusy: isBusy } : t
@@ -388,6 +459,20 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   },
 
   setPendingClaudeResume: (id: string, pending: boolean) => {
+    // Send RESUME_REQUESTED or RESUME_COMPLETE to XState machine
+    if (pending) {
+      const terminal = get().terminals.find(t => t.id === id);
+      if (terminal?.claudeSessionId) {
+        sendTerminalMachineEvent(id, { type: 'RESUME_REQUESTED', claudeSessionId: terminal.claudeSessionId });
+      }
+    } else {
+      // Resume cleared - either completed or cancelled
+      const actor = terminalActors.get(id);
+      if (actor && String(actor.getSnapshot().value) === 'pending_resume') {
+        sendTerminalMachineEvent(id, { type: 'RESUME_COMPLETE' });
+      }
+    }
+
     set((state) => ({
       terminals: state.terminals.map((t) =>
         t.id === id ? { ...t, pendingClaudeResume: pending } : t
@@ -404,6 +489,18 @@ export const useTerminalStore = create<TerminalState>((set, get) => ({
   },
 
   clearAllTerminals: () => {
+    // Clean up all resources for every terminal
+    const terminals = get().terminals;
+    for (const terminal of terminals) {
+      terminalBufferManager.dispose(terminal.id);
+      xtermCallbacks.delete(terminal.id);
+    }
+
+    // Clean up all XState actors
+    for (const [_id, actor] of terminalActors) {
+      actor.stop();
+    }
+    terminalActors.clear();
     set({ terminals: [], activeTerminalId: null, hasRestoredSessions: false });
   },
 

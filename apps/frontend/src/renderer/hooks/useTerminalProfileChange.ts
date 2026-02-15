@@ -8,7 +8,7 @@ import { debugLog, debugError } from '../../shared/utils/debug-logger';
  * Hook to handle terminal profile change events.
  * When a Claude profile switches, all terminals need to be recreated with the new profile's
  * environment variables. Terminals with active Claude sessions will have their sessions
- * migrated and can be resumed with --resume {sessionId}.
+ * migrated and automatically resumed with --continue.
  */
 export function useTerminalProfileChange(): void {
   // Track terminals being recreated to prevent duplicate processing
@@ -101,19 +101,22 @@ export function useTerminalProfileChange(): void {
         newId: newTerminal.id
       });
 
-      // If there was an active Claude session that was migrated, show a message
-      // and set up for potential resume
+      // If there was an active Claude session that was migrated, auto-resume it
       if (sessionId && sessionMigrated) {
-        debugLog('[useTerminalProfileChange] Session migrated, ready for resume:', sessionId);
-        // Store the session ID so the user can resume if desired
+        debugLog('[useTerminalProfileChange] Session migrated, auto-resuming:', sessionId);
+        // Store the session ID for tracking
         store.setClaudeSessionId(newTerminal.id, sessionId);
-        // Set pending resume flag - user can trigger resume from terminal tab
-        store.setPendingClaudeResume(newTerminal.id, true);
-        // Send a message to the terminal about the session
-        window.electronAPI.sendTerminalInput(
+
+        // Auto-resume the Claude session with --continue
+        // YOLO mode (dangerouslySkipPermissions) is preserved server-side by the
+        // main process during migration (storeMigratedSessionFlag), so resumeClaudeAsync
+        // will restore it automatically when migratedSession is true
+        window.electronAPI.resumeClaudeInTerminal(
           newTerminal.id,
-          `# Profile switched. Previous Claude session available.\n# Run: claude --resume ${sessionId}\n`
+          sessionId,
+          { migratedSession: true }
         );
+        debugLog('[useTerminalProfileChange] Resume initiated for terminal:', newTerminal.id);
       }
 
     } finally {
