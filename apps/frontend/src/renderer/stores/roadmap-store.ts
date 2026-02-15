@@ -1,4 +1,6 @@
 import { create } from 'zustand';
+import { createActor } from 'xstate';
+import type { Actor } from 'xstate';
 import type {
   Competitor,
   CompetitorAnalysis,
@@ -10,6 +12,78 @@ import type {
   TaskOutcome,
   FeatureSource
 } from '../../shared/types';
+import {
+  roadmapGenerationMachine,
+  roadmapFeatureMachine,
+  mapGenerationStateToPhase,
+  mapFeatureStateToStatus,
+  type RoadmapGenerationEvent,
+  type RoadmapFeatureEvent
+} from '../../shared/state-machines';
+
+// ---------------------------------------------------------------------------
+// Module-level XState actor singletons
+// ---------------------------------------------------------------------------
+
+let generationActor: Actor<typeof roadmapGenerationMachine> | null = null;
+const featureActors = new Map<string, Actor<typeof roadmapFeatureMachine>>();
+
+/**
+ * Get or create the singleton generation actor.
+ */
+function getOrCreateGenerationActor(): Actor<typeof roadmapGenerationMachine> {
+  if (!generationActor) {
+    generationActor = createActor(roadmapGenerationMachine);
+    generationActor.start();
+  }
+  return generationActor;
+}
+
+/**
+ * Get or create a feature actor for a given feature ID.
+ * Optionally provide an initial state to restore from persisted data.
+ */
+function getOrCreateFeatureActor(
+  featureId: string,
+  initialState?: RoadmapFeatureStatus,
+  initialContext?: Partial<{ linkedSpecId: string; taskOutcome: TaskOutcome; previousStatus: RoadmapFeatureStatus }>
+): Actor<typeof roadmapFeatureMachine> {
+  let actor = featureActors.get(featureId);
+  // Invalidate cached actor if its state or context doesn't match the expected values
+  if (actor && initialState) {
+    const snapshot = actor.getSnapshot();
+    const currentValue = String(snapshot.value);
+    const ctx = snapshot.context;
+    const contextMismatch = initialContext && (
+      ctx.taskOutcome !== (initialContext.taskOutcome ?? undefined) ||
+      ctx.previousStatus !== (initialContext.previousStatus ?? undefined) ||
+      ctx.linkedSpecId !== (initialContext.linkedSpecId ?? undefined)
+    );
+    if (currentValue !== initialState || contextMismatch) {
+      actor.stop();
+      featureActors.delete(featureId);
+      actor = undefined;
+    }
+  }
+  if (!actor) {
+    if (initialState) {
+      const resolvedSnapshot = roadmapFeatureMachine.resolveState({
+        value: initialState,
+        context: {
+          linkedSpecId: initialContext?.linkedSpecId ?? undefined,
+          taskOutcome: initialContext?.taskOutcome ?? undefined,
+          previousStatus: initialContext?.previousStatus ?? undefined
+        }
+      });
+      actor = createActor(roadmapFeatureMachine, { snapshot: resolvedSnapshot });
+    } else {
+      actor = createActor(roadmapFeatureMachine);
+    }
+    actor.start();
+    featureActors.set(featureId, actor);
+  }
+  return actor;
+}
 
 /**
  * Migrate roadmap data to latest schema
@@ -81,6 +155,25 @@ const initialGenerationStatus: RoadmapGenerationStatus = {
   message: ''
 };
 
+/**
+ * Derive RoadmapGenerationStatus from the generation actor's current snapshot.
+ */
+function deriveGenerationStatus(actor: Actor<typeof roadmapGenerationMachine>): RoadmapGenerationStatus {
+  const snapshot = actor.getSnapshot();
+  const phase = mapGenerationStateToPhase(String(snapshot.value));
+  const ctx = snapshot.context;
+  return {
+    phase,
+    progress: ctx.progress,
+    message: ctx.message ?? '',
+    error: ctx.error,
+    startedAt: ctx.startedAt ? new Date(ctx.startedAt) : undefined,
+    lastActivityAt: phase !== 'idle' && phase !== 'complete' && phase !== 'error'
+      ? new Date()
+      : undefined
+  };
+}
+
 export const useRoadmapStore = create<RoadmapState>((set) => ({
   // Initial state
   roadmap: null,
@@ -89,93 +182,203 @@ export const useRoadmapStore = create<RoadmapState>((set) => ({
   currentProjectId: null,
 
   // Actions
-  setRoadmap: (roadmap) => set({ roadmap }),
+  setRoadmap: (roadmap) => {
+    featureActors.forEach((actor) => actor.stop());
+    featureActors.clear();
+    return set({ roadmap });
+  },
 
   setCompetitorAnalysis: (analysis) => set({ competitorAnalysis: analysis }),
 
-  setGenerationStatus: (status) =>
-    set((state) => {
-      const now = new Date();
-      const isStartingGeneration =
-        state.generationStatus.phase === 'idle' && status.phase !== 'idle';
-      const isStoppingGeneration = status.phase === 'idle' || status.phase === 'complete' || status.phase === 'error';
+  setGenerationStatus: (status) => {
+    const actor = getOrCreateGenerationActor();
 
-      return {
-        generationStatus: {
-          ...status,
-          // Set startedAt when transitioning from idle to active, but preserve passed timestamp if provided (for restoring persisted state)
-          startedAt: isStartingGeneration
-            ? (status.startedAt ?? now)
-            : isStoppingGeneration
-              ? undefined
-              : status.startedAt ?? state.generationStatus.startedAt,
-          // Update lastActivityAt on any status change, but preserve passed timestamp if provided (for restoring persisted state)
-          lastActivityAt: isStoppingGeneration ? undefined : (status.lastActivityAt ?? now)
+    // Map the incoming status phase to an XState event
+    let event: RoadmapGenerationEvent | null = null;
+    switch (status.phase) {
+      case 'analyzing':
+        // If idle, start generation; otherwise it's a progress update
+        if (String(actor.getSnapshot().value) === 'idle') {
+          event = { type: 'START_GENERATION' };
         }
-      };
-    }),
+        break;
+      case 'discovering':
+        event = { type: 'DISCOVERY_STARTED' };
+        break;
+      case 'generating':
+        event = { type: 'GENERATION_STARTED' };
+        break;
+      case 'complete':
+        event = { type: 'GENERATION_COMPLETE' };
+        break;
+      case 'error':
+        event = { type: 'GENERATION_ERROR', error: status.error ?? 'Unknown error' };
+        break;
+      case 'idle': {
+        // Stop or reset depending on current state
+        const currentState = String(actor.getSnapshot().value);
+        if (currentState === 'complete' || currentState === 'error') {
+          event = { type: 'RESET' };
+        } else if (currentState !== 'idle') {
+          event = { type: 'STOP' };
+        }
+        break;
+      }
+    }
+
+    if (event) {
+      actor.send(event);
+    }
+
+    // Send progress updates for active states
+    if (status.progress !== undefined && status.message) {
+      const currentState = String(actor.getSnapshot().value);
+      if (currentState === 'analyzing' || currentState === 'discovering' || currentState === 'generating') {
+        actor.send({ type: 'PROGRESS_UPDATE', progress: status.progress, message: status.message });
+      }
+    }
+
+    // Derive store state from the actor snapshot
+    set({ generationStatus: deriveGenerationStatus(actor) });
+  },
 
   setCurrentProjectId: (projectId) => set({ currentProjectId: projectId }),
 
-  updateFeatureStatus: (featureId, status) =>
-    set((state) => {
-      if (!state.roadmap) return state;
+  updateFeatureStatus: (featureId, status) => {
+    const state = useRoadmapStore.getState();
+    if (!state.roadmap) return;
 
-      const updatedFeatures = state.roadmap.features.map((feature) =>
-        feature.id === featureId
-          ? { ...feature, status, ...(status !== 'done' ? { taskOutcome: undefined, previousStatus: undefined } : {}) }
-          : feature
+    const feature = state.roadmap.features.find((f) => f.id === featureId);
+    if (!feature) return;
+
+    // Determine the XState event based on target status
+    const eventMap: Record<RoadmapFeatureStatus, RoadmapFeatureEvent> = {
+      planned: { type: 'PLAN' },
+      in_progress: { type: 'START_PROGRESS' },
+      done: { type: 'MARK_DONE' },
+      under_review: { type: 'MOVE_TO_REVIEW' }
+    };
+
+    const actor = getOrCreateFeatureActor(featureId, feature.status, {
+      linkedSpecId: feature.linkedSpecId,
+      taskOutcome: feature.taskOutcome,
+      previousStatus: feature.previousStatus
+    });
+    actor.send(eventMap[status]);
+
+    const snapshot = actor.getSnapshot();
+    const derivedStatus = mapFeatureStateToStatus(String(snapshot.value));
+    const ctx = snapshot.context;
+
+    // Skip store write if XState silently ignored the event (no-op transition)
+    if (derivedStatus === feature.status && ctx.taskOutcome === feature.taskOutcome && ctx.previousStatus === feature.previousStatus) return;
+
+    set((s) => {
+      if (!s.roadmap) return s;
+      const updatedFeatures = s.roadmap.features.map((f) =>
+        f.id === featureId
+          ? {
+              ...f,
+              status: derivedStatus,
+              taskOutcome: ctx.taskOutcome,
+              previousStatus: ctx.previousStatus
+            }
+          : f
       );
-
       return {
-        roadmap: {
-          ...state.roadmap,
-          features: updatedFeatures,
-          updatedAt: new Date()
-        }
+        roadmap: { ...s.roadmap, features: updatedFeatures, updatedAt: new Date() }
       };
-    }),
+    });
+  },
 
   // Mark feature as done when its linked task completes
-  markFeatureDoneBySpecId: (specId: string, taskOutcome: TaskOutcome = 'completed') =>
-    set((state) => {
-      if (!state.roadmap) return state;
+  markFeatureDoneBySpecId: (specId: string, taskOutcome: TaskOutcome = 'completed') => {
+    const state = useRoadmapStore.getState();
+    if (!state.roadmap) return;
 
-      const updatedFeatures = state.roadmap.features.map((feature) =>
-        feature.linkedSpecId === specId
-          ? { ...feature, status: 'done' as RoadmapFeatureStatus, taskOutcome, previousStatus: feature.status !== 'done' ? feature.status : feature.previousStatus }
-          : feature
-      );
+    // Determine the XState event based on task outcome
+    const outcomeEventMap: Record<TaskOutcome, RoadmapFeatureEvent> = {
+      completed: { type: 'TASK_COMPLETED' },
+      deleted: { type: 'TASK_DELETED' },
+      archived: { type: 'TASK_ARCHIVED' }
+    };
 
+    const event = outcomeEventMap[taskOutcome];
+
+    // Process actors outside set() — collect derived state per feature
+    const featureUpdates = new Map<string, { status: RoadmapFeatureStatus; taskOutcome?: TaskOutcome; previousStatus?: RoadmapFeatureStatus }>();
+    for (const feature of state.roadmap.features) {
+      if (feature.linkedSpecId !== specId) continue;
+
+      const actor = getOrCreateFeatureActor(feature.id, feature.status, {
+        linkedSpecId: feature.linkedSpecId,
+        taskOutcome: feature.taskOutcome,
+        previousStatus: feature.previousStatus
+      });
+      actor.send(event);
+
+      const snapshot = actor.getSnapshot();
+      const ctx = snapshot.context;
+      featureUpdates.set(feature.id, {
+        status: mapFeatureStateToStatus(String(snapshot.value)),
+        taskOutcome: ctx.taskOutcome,
+        previousStatus: ctx.previousStatus
+      });
+    }
+
+    if (featureUpdates.size === 0) return;
+
+    set((s) => {
+      if (!s.roadmap) return s;
+      const updatedFeatures = s.roadmap.features.map((f) => {
+        const update = featureUpdates.get(f.id);
+        return update ? { ...f, ...update } : f;
+      });
       return {
-        roadmap: {
-          ...state.roadmap,
-          features: updatedFeatures,
-          updatedAt: new Date()
-        }
+        roadmap: { ...s.roadmap, features: updatedFeatures, updatedAt: new Date() }
       };
-    }),
+    });
+  },
 
-  updateFeatureLinkedSpec: (featureId, specId) =>
-    set((state) => {
-      if (!state.roadmap) return state;
+  updateFeatureLinkedSpec: (featureId, specId) => {
+    const state = useRoadmapStore.getState();
+    if (!state.roadmap) return;
 
-      const updatedFeatures = state.roadmap.features.map((feature) =>
-        feature.id === featureId
-          ? { ...feature, linkedSpecId: specId, status: 'in_progress' as RoadmapFeatureStatus }
-          : feature
+    const feature = state.roadmap.features.find((f) => f.id === featureId);
+    if (!feature) return;
+
+    const actor = getOrCreateFeatureActor(featureId, feature.status, {
+      linkedSpecId: feature.linkedSpecId,
+      taskOutcome: feature.taskOutcome,
+      previousStatus: feature.previousStatus
+    });
+    actor.send({ type: 'LINK_SPEC', specId } satisfies RoadmapFeatureEvent);
+
+    const snapshot = actor.getSnapshot();
+    const derivedStatus = mapFeatureStateToStatus(String(snapshot.value));
+    const ctx = snapshot.context;
+
+    set((s) => {
+      if (!s.roadmap) return s;
+      const updatedFeatures = s.roadmap.features.map((f) =>
+        f.id === featureId
+          ? { ...f, linkedSpecId: ctx.linkedSpecId ?? specId, status: derivedStatus }
+          : f
       );
-
       return {
-        roadmap: {
-          ...state.roadmap,
-          features: updatedFeatures,
-          updatedAt: new Date()
-        }
+        roadmap: { ...s.roadmap, features: updatedFeatures, updatedAt: new Date() }
       };
-    }),
+    });
+  },
 
-  deleteFeature: (featureId) =>
+  deleteFeature: (featureId) => {
+    // Stop and remove the feature's actor outside set()
+    const actor = featureActors.get(featureId);
+    if (actor) {
+      actor.stop();
+      featureActors.delete(featureId);
+    }
+
     set((state) => {
       if (!state.roadmap) return state;
 
@@ -190,15 +393,27 @@ export const useRoadmapStore = create<RoadmapState>((set) => ({
           updatedAt: new Date()
         }
       };
-    }),
+    });
+  },
 
-  clearRoadmap: () =>
-    set({
+  clearRoadmap: () => {
+    // Stop all actors and clear Maps
+    if (generationActor) {
+      generationActor.stop();
+      generationActor = null;
+    }
+    featureActors.forEach((actor) => {
+      actor.stop();
+    });
+    featureActors.clear();
+
+    return set({
       roadmap: null,
       competitorAnalysis: null,
       generationStatus: initialGenerationStatus,
       currentProjectId: null
-    }),
+    });
+  },
 
   // Reorder features within a phase
   reorderFeatures: (phaseId, featureIds) =>
