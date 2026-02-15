@@ -42,6 +42,19 @@ export function getSslVerify(instanceUrl: string): boolean {
 // Error Extraction
 // ============================================
 
+/**
+ * Custom error class for GitLab API errors with structured status code
+ */
+export class GitLabAPIError extends Error {
+  public readonly statusCode: number;
+
+  constructor(message: string, statusCode: number) {
+    super(message);
+    this.name = 'GitLabAPIError';
+    this.statusCode = statusCode;
+  }
+}
+
 // Known TLS error codes — hoisted to module scope to avoid re-allocation per call.
 const SSL_ERROR_CODES = new Set([
   'DEPTH_ZERO_SELF_SIGNED_CERT',
@@ -453,7 +466,10 @@ export async function gitlabFetch(
 
     if (!response.ok) {
       const errorBody = await response.text();
-      throw new Error(`GitLab API error: ${response.status} ${response.statusText} - ${errorBody}`);
+      throw new GitLabAPIError(
+        `GitLab API error: ${response.status} ${response.statusText} - ${errorBody}`,
+        response.status
+      );
     }
 
     return response.json();
@@ -486,7 +502,10 @@ export async function gitlabFetchWithCount(
 
     if (!response.ok) {
       const errorBody = await response.text();
-      throw new Error(`GitLab API error: ${response.status} ${response.statusText} - ${errorBody}`);
+      throw new GitLabAPIError(
+        `GitLab API error: ${response.status} ${response.statusText} - ${errorBody}`,
+        response.status
+      );
     }
 
     // Get total count from X-Total header (GitLab's pagination header)
