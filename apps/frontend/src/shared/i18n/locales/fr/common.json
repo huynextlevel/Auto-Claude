@@ -29,6 +29,7 @@
   },
   "accessibility": {
     "deleteFeatureAriaLabel": "Supprimer la fonctionnalité",
+    "archiveFeatureAriaLabel": "Archiver la fonctionnalité",
     "closeFeatureDetailsAriaLabel": "Fermer les détails de la fonctionnalité",
     "regenerateRoadmapAriaLabel": "Régénérer la feuille de route",
     "repositoryOwnerAriaLabel": "Propriétaire du dépôt",
@@ -620,7 +621,10 @@
     "taskArchived": "Archivé",
     "showMoreFeatures": "Afficher {{count}} fonctionnalité supplémentaire",
     "showMoreFeatures_plural": "Afficher {{count}} fonctionnalités supplémentaires",
-    "showLessFeatures": "Afficher moins"
+    "showLessFeatures": "Afficher moins",
+    "archiveFeature": "Archiver",
+    "archiveFeatureConfirmTitle": "Archiver la fonctionnalité ?",
+    "archiveFeatureConfirmDescription": "Cela supprimera \"{{title}}\" de votre feuille de route."
   },
   "roadmapGeneration": {
     "progress": "Progression",
