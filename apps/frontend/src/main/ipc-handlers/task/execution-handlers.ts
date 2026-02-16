@@ -179,6 +179,34 @@ export function registerTaskExecutionHandlers(
       // - lastSequenceByTask doesn't drop events from the new process
       taskStateManager.prepareForRestart(taskId);
 
+      // Check if implementation_plan.json has valid subtasks BEFORE XState handling.
+      // This is more reliable than task.subtasks.length which may not be loaded yet.
+      const specsBaseDir = getSpecsDir(project.autoBuildPath);
+      const specDir = path.join(
+        project.path,
+        specsBaseDir,
+        task.specId
+      );
+      const planFilePath = path.join(specDir, AUTO_BUILD_PATHS.IMPLEMENTATION_PLAN);
+      let planHasSubtasks = false;
+      if (existsSync(planFilePath)) {
+        try {
+          const planContent = readFileSync(planFilePath, 'utf-8');
+          const plan = JSON.parse(planContent);
+          const phases = plan?.phases;
+          if (Array.isArray(phases)) {
+            const subtaskCount = phases.reduce(
+              (sum: number, phase: { subtasks?: unknown[] }) =>
+                sum + (Array.isArray(phase.subtasks) ? phase.subtasks.length : 0),
+              0
+            );
+            planHasSubtasks = subtaskCount > 0;
+          }
+        } catch {
+          // Invalid/corrupt plan file - treat as no subtasks
+        }
+      }
+
       // Immediately mark as started so the UI moves the card to In Progress.
       // Use XState actor state as source of truth (if actor exists), with task data as fallback.
       // - plan_review: User approved the plan, send PLAN_APPROVED to transition to coding
@@ -191,6 +219,11 @@ export function registerTaskExecutionHandlers(
         // XState says plan_review - send PLAN_APPROVED
         console.warn('[TASK_START] XState: plan_review -> coding via PLAN_APPROVED');
         taskStateManager.handleUiEvent(taskId, { type: 'PLAN_APPROVED' }, task, project);
+      } else if (currentXState === 'error' && !planHasSubtasks) {
+        // FIX (#1562): Task crashed during planning (no subtasks yet).
+        // Uses planHasSubtasks from implementation_plan.json (more reliable than task.subtasks.length).
+        console.warn('[TASK_START] XState: error with no plan subtasks -> planning via PLANNING_STARTED');
+        taskStateManager.handleUiEvent(taskId, { type: 'PLANNING_STARTED' }, task, project);
       } else if (currentXState === 'human_review' || currentXState === 'error') {
         // XState says human_review or error - send USER_RESUMED
         console.warn('[TASK_START] XState:', currentXState, '-> coding via USER_RESUMED');
@@ -204,6 +237,11 @@ export function registerTaskExecutionHandlers(
         // No XState actor - fallback to task data (e.g., after app restart)
         console.warn('[TASK_START] No XState actor, task data: plan_review -> coding via PLAN_APPROVED');
         taskStateManager.handleUiEvent(taskId, { type: 'PLAN_APPROVED' }, task, project);
+      } else if (task.status === 'error' && !planHasSubtasks) {
+        // FIX (#1562): No XState actor, task crashed during planning (no subtasks).
+        // Uses planHasSubtasks from implementation_plan.json (more reliable than task.subtasks.length).
+        console.warn('[TASK_START] No XState actor, error with no plan subtasks -> planning via PLANNING_STARTED');
+        taskStateManager.handleUiEvent(taskId, { type: 'PLANNING_STARTED' }, task, project);
       } else if (task.status === 'human_review' || task.status === 'error') {
         // No XState actor - fallback to task data for resuming
         console.warn('[TASK_START] No XState actor, task data:', task.status, '-> coding via USER_RESUMED');
@@ -224,22 +262,24 @@ export function registerTaskExecutionHandlers(
 
       // Start file watcher for this task
       // Use worktree path if it exists, since the backend writes implementation_plan.json there
-      const specsBaseDir = getSpecsDir(project.autoBuildPath);
       const watchSpecDir = getSpecDirForWatcher(project.path, specsBaseDir, task.specId);
       fileWatcher.watch(taskId, watchSpecDir);
 
       // Check if spec.md exists (indicates spec creation was already done or in progress)
       // Check main project path for spec file (spec is created before worktree)
-      const specDir = path.join(project.path, specsBaseDir, task.specId);
       const specFilePath = path.join(specDir, AUTO_BUILD_PATHS.SPEC_FILE);
       const hasSpec = existsSync(specFilePath);
 
       // Check if this task needs spec creation first (no spec file = not yet created)
       // OR if it has a spec but no implementation plan subtasks (spec created, needs planning/building)
       const needsSpecCreation = !hasSpec;
-      const needsImplementation = hasSpec && task.subtasks.length === 0;
+      // FIX (#1562): Check actual plan file for subtasks, not just task.subtasks.length.
+      // When a task crashes during planning, it may have spec.md but an empty/missing
+      // implementation_plan.json. Previously, this path would call startTaskExecution
+      // (run.py) which expects subtasks to exist. Now we check the actual plan file.
+      const needsImplementation = hasSpec && !planHasSubtasks;
 
-      console.warn('[TASK_START] hasSpec:', hasSpec, 'needsSpecCreation:', needsSpecCreation, 'needsImplementation:', needsImplementation);
+      console.warn('[TASK_START] hasSpec:', hasSpec, 'planHasSubtasks:', planHasSubtasks, 'needsSpecCreation:', needsSpecCreation, 'needsImplementation:', needsImplementation);
 
       // Get base branch: task-level override takes precedence over project settings
       const baseBranch = task.metadata?.baseBranch || project.settings?.mainBranch;
@@ -254,18 +294,12 @@ export function registerTaskExecutionHandlers(
         // Also pass baseBranch so worktrees are created from the correct branch
         agentManager.startSpecCreation(taskId, project.path, taskDescription, specDir, task.metadata, baseBranch, project.id);
       } else if (needsImplementation) {
-        // Spec exists but no subtasks - run run.py to create implementation plan and execute
-        // Read the spec.md to get the task description
-        const _taskDescription = task.description || task.title;
-        try {
-          readFileSync(specFilePath, 'utf-8');
-        } catch {
-          // Use default description
-        }
-
-        console.warn('[TASK_START] Starting task execution (no subtasks) for:', task.specId);
-        // Start task execution which will create the implementation plan
-        // Note: No parallel mode for planning phase - parallel only makes sense with multiple subtasks
+        // Spec exists but no valid subtasks in implementation plan
+        // FIX (#1562): Use startTaskExecution (run.py) which will create the planner
+        // agent session to generate the implementation plan. run.py handles the case
+        // where implementation_plan.json is missing or has no subtasks - the planner
+        // agent will generate the plan before the coder starts.
+        console.warn('[TASK_START] Starting task execution (no valid subtasks in plan) for:', task.specId);
         agentManager.startTaskExecution(
           taskId,
           project.path,
