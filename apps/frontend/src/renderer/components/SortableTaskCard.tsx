@@ -50,15 +50,11 @@ export const SortableTaskCard = memo(function SortableTaskCard({ task, onClick, 
     transition,
     isDragging,
     isOver
-<<<<<<< HEAD
   } = useSortable({
     id: task.id,
     disabled: task.status === 'in_progress', // Prevent dragging tasks that are currently running or stuck
     animateLayoutChanges
   });
-=======
-  } = useSortable({ id: task.id, animateLayoutChanges });
->>>>>>> bb83399cac9d0f1f3f67a753d48732e058121ae6
 
   const style = {
     transform: CSS.Transform.toString(transform),
