@@ -702,6 +702,13 @@
       "remote": "Remote"
     }
   },
+  "windowControls": {
+    "minimize": "Minimize",
+    "maximize": "Maximize",
+    "restore": "Restore",
+    "close": "Close"
+  },
+  "appTitle": "Auto Claude",
   "githubErrors": {
     "rateLimitTitle": "GitHub Rate Limit Reached",
     "authTitle": "GitHub Authentication Required",

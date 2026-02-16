@@ -5,5 +5,14 @@
       "titleSuffix": "(JSON Error)",
       "description": "⚠️ JSON Parse Error: {{error}}\n\nThe implementation_plan.json file is malformed. Run the backend auto-fix or manually repair the file."
     }
+  },
+  "initialize": {
+    "failed": "Failed to initialize Auto Claude. Please try again.",
+    "unexpected": "An unexpected error occurred"
+  },
+  "errorBoundary": {
+    "title": "Something went wrong",
+    "description": "An error occurred while rendering this content.",
+    "retryButton": "Try Again"
   }
 }

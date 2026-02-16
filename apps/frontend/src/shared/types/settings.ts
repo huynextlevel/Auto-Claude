@@ -6,8 +6,12 @@ import type { NotificationSettings, GraphitiEmbeddingProvider } from './project'
 import type { ChangelogFormat, ChangelogAudience, ChangelogEmojiLevel } from './changelog';
 import type { SupportedLanguage } from '../constants/i18n';
 
+// Sidebar view identifiers — shared across navigation-store, Sidebar, and ViewSwitcher
+export type SidebarView = 'kanban' | 'terminals' | 'roadmap' | 'context' | 'ideation' | 'github-issues' | 'gitlab-issues' | 'github-prs' | 'gitlab-merge-requests' | 'changelog' | 'insights' | 'worktrees' | 'agent-tools';
+
 // Color theme types for multi-theme support
-export type ColorTheme = 'default' | 'dusk' | 'lime' | 'ocean' | 'retro' | 'neo' | 'forest';
+export type BuiltinColorTheme = 'default' | 'dusk' | 'lime' | 'ocean' | 'retro' | 'neo' | 'forest';
+export type ColorTheme = BuiltinColorTheme | `custom:${string}`;
 
 // Developer tools preferences - IDE and terminal selection
 // Comprehensive list based on Stack Overflow Developer Survey 2024, JetBrains Survey, and market research
@@ -155,6 +159,7 @@ export interface ColorThemeDefinition {
   name: string;
   description: string;
   previewColors: ThemePreviewColors;
+  isCustom?: boolean;
 }
 
 // Thinking level for Claude model (budget token allocation)
