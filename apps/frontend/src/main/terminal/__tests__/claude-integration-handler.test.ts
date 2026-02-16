@@ -90,6 +90,12 @@ vi.mock('../pty-manager', () => ({
   writeToPty: mockWriteToPty,
 }));
 
+// Mock setActiveAPIProfile for handleRateLimit API profile auto-switch
+const mockSetActiveAPIProfile = vi.fn().mockResolvedValue({});
+vi.mock('../../services/profile/profile-manager', () => ({
+  setActiveAPIProfile: mockSetActiveAPIProfile,
+}));
+
 vi.mock('os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('os')>();
   return {
@@ -1115,6 +1121,226 @@ describe('claude-integration-handler - Helper Functions', () => {
 
       // Tab instead of space doesn't match
       expect(shouldAutoRenameTerminal('Terminal\t1')).toBe(false);
+    });
+  });
+
+  // ===========================================================================
+  // handleRateLimit — Unified account selection (OAuth + API)
+  // ===========================================================================
+  describe('handleRateLimit - unified account selection', () => {
+    const mockExtractRateLimitReset = vi.fn();
+    const mockBestAvailableUnifiedAccount = vi.fn();
+    const mockRecordRateLimitEvent = vi.fn().mockReturnValue({ type: 'session' });
+    const mockGetAutoSwitchSettings = vi.fn();
+    const mockSwitchProfileCallback = vi.fn().mockResolvedValue(undefined);
+    const mockSendIpc = vi.fn();
+
+    function createRateLimitTestContext() {
+      const terminal = createMockTerminal({ claudeProfileId: 'oauth-1' });
+      const lastNotified = new Map<string, string>();
+
+      mockExtractRateLimitReset.mockReturnValue('Feb 19 at 11am');
+      mockBestAvailableUnifiedAccount.mockResolvedValue(null);
+      mockGetAutoSwitchSettings.mockReturnValue({
+        enabled: true,
+        autoSwitchOnRateLimit: true,
+      });
+
+      mockGetClaudeProfileManager.mockReturnValue({
+        recordRateLimitEvent: mockRecordRateLimitEvent,
+        getAutoSwitchSettings: mockGetAutoSwitchSettings,
+        getBestAvailableUnifiedAccount: mockBestAvailableUnifiedAccount,
+      });
+
+      const getWindow = vi.fn().mockReturnValue({
+        webContents: { send: mockSendIpc },
+      });
+
+      return { terminal, lastNotified, getWindow };
+    }
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    it('sends IPC event with suggestedAccountType for API profiles', async () => {
+      const { handleRateLimit } = await import('../claude-integration-handler');
+      const { terminal, lastNotified, getWindow } = createRateLimitTestContext();
+
+      mockBestAvailableUnifiedAccount.mockResolvedValue({
+        id: 'api-glm-1',
+        name: 'GLM API',
+        type: 'api',
+        isAvailable: true,
+      });
+
+      handleRateLimit(terminal, 'Limit reached · resets Feb 19 at 11am', lastNotified, getWindow, mockSwitchProfileCallback);
+
+      // Wait for async unified account selection
+      await vi.waitFor(() => {
+        expect(mockSendIpc).toHaveBeenCalled();
+      });
+
+      const ipcPayload = mockSendIpc.mock.calls[0][1];
+      expect(ipcPayload.suggestedAccountType).toBe('api');
+      expect(ipcPayload.suggestedProfileId).toBe('api-glm-1');
+      expect(ipcPayload.suggestedProfileName).toBe('GLM API');
+    });
+
+    it('calls setActiveAPIProfile (not switchProfileCallback) when auto-switching to API profile', async () => {
+      const { handleRateLimit } = await import('../claude-integration-handler');
+      const { terminal, lastNotified, getWindow } = createRateLimitTestContext();
+
+      mockBestAvailableUnifiedAccount.mockResolvedValue({
+        id: 'api-glm-1',
+        name: 'GLM API',
+        type: 'api',
+        isAvailable: true,
+      });
+
+      handleRateLimit(terminal, 'Limit reached · resets Feb 19 at 11am', lastNotified, getWindow, mockSwitchProfileCallback);
+
+      await vi.waitFor(() => {
+        expect(mockSetActiveAPIProfile).toHaveBeenCalledWith('api-glm-1');
+      });
+
+      // switchProfileCallback should NOT be called for API profiles
+      expect(mockSwitchProfileCallback).not.toHaveBeenCalled();
+    });
+
+    it('calls switchProfileCallback (not setActiveAPIProfile) when auto-switching to OAuth profile', async () => {
+      const { handleRateLimit } = await import('../claude-integration-handler');
+      const { terminal, lastNotified, getWindow } = createRateLimitTestContext();
+
+      mockBestAvailableUnifiedAccount.mockResolvedValue({
+        id: 'oauth-2',
+        name: 'Account 2',
+        type: 'oauth',
+        isAvailable: true,
+      });
+
+      handleRateLimit(terminal, 'Limit reached · resets Feb 19 at 11am', lastNotified, getWindow, mockSwitchProfileCallback);
+
+      await vi.waitFor(() => {
+        expect(mockSwitchProfileCallback).toHaveBeenCalledWith('term-1', 'oauth-2');
+      });
+
+      // setActiveAPIProfile should NOT be called for OAuth profiles
+      expect(mockSetActiveAPIProfile).not.toHaveBeenCalled();
+    });
+
+    it('sends IPC event without suggested profile when unified account selection fails', async () => {
+      const { handleRateLimit } = await import('../claude-integration-handler');
+      const { terminal, lastNotified, getWindow } = createRateLimitTestContext();
+
+      mockBestAvailableUnifiedAccount.mockRejectedValue(new Error('Profile load failed'));
+
+      handleRateLimit(terminal, 'Limit reached · resets Feb 19 at 11am', lastNotified, getWindow, mockSwitchProfileCallback);
+
+      // Wait for the error fallback path
+      await vi.waitFor(() => {
+        expect(mockSendIpc).toHaveBeenCalled();
+      });
+
+      const ipcPayload = mockSendIpc.mock.calls[0][1];
+      expect(ipcPayload.suggestedProfileId).toBeUndefined();
+      expect(ipcPayload.suggestedAccountType).toBeUndefined();
+    });
+
+    it('does not auto-switch when autoSwitchOnRateLimit is disabled', async () => {
+      const { handleRateLimit } = await import('../claude-integration-handler');
+      const { terminal, lastNotified, getWindow } = createRateLimitTestContext();
+
+      mockGetAutoSwitchSettings.mockReturnValue({
+        enabled: true,
+        autoSwitchOnRateLimit: false,
+      });
+
+      mockBestAvailableUnifiedAccount.mockResolvedValue({
+        id: 'api-glm-1',
+        name: 'GLM API',
+        type: 'api',
+        isAvailable: true,
+      });
+
+      handleRateLimit(terminal, 'Limit reached · resets Feb 19 at 11am', lastNotified, getWindow, mockSwitchProfileCallback);
+
+      await vi.waitFor(() => {
+        expect(mockSendIpc).toHaveBeenCalled();
+      });
+
+      // Neither switch mechanism should be called
+      expect(mockSetActiveAPIProfile).not.toHaveBeenCalled();
+      expect(mockSwitchProfileCallback).not.toHaveBeenCalled();
+    });
+
+    it('does not auto-switch when no best account is available', async () => {
+      const { handleRateLimit } = await import('../claude-integration-handler');
+      const { terminal, lastNotified, getWindow } = createRateLimitTestContext();
+
+      mockBestAvailableUnifiedAccount.mockResolvedValue(null);
+
+      handleRateLimit(terminal, 'Limit reached · resets Feb 19 at 11am', lastNotified, getWindow, mockSwitchProfileCallback);
+
+      await vi.waitFor(() => {
+        expect(mockSendIpc).toHaveBeenCalled();
+      });
+
+      expect(mockSetActiveAPIProfile).not.toHaveBeenCalled();
+      expect(mockSwitchProfileCallback).not.toHaveBeenCalled();
+    });
+  });
+
+  // ===========================================================================
+  // Proactive swap — respects manual profile selections
+  // ===========================================================================
+  describe('proactive swap respects manual profile selection', () => {
+    it('does not run proactive swap when profileId is explicitly provided (manual switch)', async () => {
+      // Set up a profile manager where getBestAvailableUnifiedAccount would swap
+      // to a different profile if called — proving it was NOT called.
+      const mockBestUnified = vi.fn().mockResolvedValue({
+        id: 'api-glm-1',
+        name: 'GLM API',
+        type: 'api',
+        isAvailable: true,
+      });
+      const profileManager = {
+        getActiveProfile: vi.fn(() => ({
+          id: 'oauth-1', name: 'Account 1', isDefault: true,
+        })),
+        getProfile: vi.fn((id: string) => ({
+          id, name: 'Manually Selected', isDefault: false,
+          configDir: '/tmp/manual-config',
+        })),
+        getAutoSwitchSettings: vi.fn(() => ({
+          enabled: true, autoSwitchOnRateLimit: true,
+        })),
+        getBestAvailableUnifiedAccount: mockBestUnified,
+        getProfileToken: vi.fn(() => null),
+        markProfileUsed: vi.fn(),
+        setActiveProfile: vi.fn(),
+      };
+
+      mockGetClaudeCliInvocationAsync.mockResolvedValue({
+        command: '/opt/claude/bin/claude',
+        env: { PATH: '/opt/claude/bin:/usr/bin' },
+      });
+      mockInitializeClaudeProfileManager.mockResolvedValue(profileManager);
+      mockGetClaudeProfileManager.mockReturnValue(profileManager);
+
+      const terminal = createMockTerminal();
+      const { invokeClaudeAsync } = await import('../claude-integration-handler');
+
+      // Provide an explicit profileId — simulating a manual switch
+      await invokeClaudeAsync(terminal, '/tmp/project', 'manual-profile-1', () => null, vi.fn());
+
+      // getBestAvailableUnifiedAccount should NOT have been called
+      // because proactive swap is skipped when profileId is explicit
+      expect(mockBestUnified).not.toHaveBeenCalled();
+
+      // The explicit profile should be used, not the auto-selected one
+      expect(profileManager.getProfile).toHaveBeenCalledWith('manual-profile-1');
+      expect(profileManager.markProfileUsed).toHaveBeenCalledWith('manual-profile-1');
     });
   });
 });
